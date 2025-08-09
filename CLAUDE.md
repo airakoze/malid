@@ -83,3 +83,58 @@ Tests use pytest with GPU/CPU markers. Test data snapshots in `tests/snapshot/` 
 - CPU-only fallback available
 - Python 3.9 required
 - JAX memory management via `XLA_PYTHON_CLIENT_PREALLOCATE=false` for GPU
+
+## Applying Mal-ID to HIV: time-to-rebound
+
+Mal-ID is classification-first, but it can support time-to-event (e.g., time to viral rebound after ATI) via a two-stage approach: use Mal-ID to produce immune-repertoire features, then fit a survival model on those features.
+
+### Data you need
+- **Sequences + metadata** for HIV participants (BCR and/or TCR), ideally at a consistent pre-ATI timepoint.
+- Extend `metadata/hiv_cohort.specimens.tsv` (or a separate table you merge in ETL) with survival fields:
+  - `participant_label`, `specimen_label`, `disease`, `disease_subtype` (use existing conventions)
+  - `specimen_time_point` (e.g., "Pre-ATI" or a day string like `0 days`)
+  - `time_to_rebound_days` (numeric, duration until rebound or censor)
+  - `rebounded` (1 if observed rebound, 0 if right-censored)
+  - Optionally `ati_date`, `rebound_date` (for provenance)
+- Optional: set `hiv_run_filter=True` for HIV participants (ETL respects this to include only allowed runs).
+
+### Ingest/update metadata
+- Place your updated table in `metadata/` and add a merge in `notebooks_src/assemble_etl_metadata.py` (see the existing HIV block). Regenerate the combined table:
+
+```bash
+./run_notebooks.sh notebooks/assemble_etl_metadata.ipynb
+```
+
+This writes `metadata/generated_combined_specimen_metadata.tsv` used downstream.
+
+### Generate embeddings for the cohort
+Follow the external-cohort path (fold `-1`) as in the README:
+
+```bash
+python scripts/run_embedding.py --fold_id -1 --external-cohort 2>&1 | tee data/logs/external_validation_cohort_embedding.log
+python scripts/scale_embedding_anndatas.py --fold_id -1 --external-cohort 2>&1 | tee data/logs/external_validation_cohort_scaling.log
+```
+
+### Featurize with Mal-ID metamodels
+- Load metamodels and featurize to obtain specimen-level feature matrices (see `notebooks/evaluate_external_cohorts.ipynb` for a working pattern). You’ll get:
+  - `X`: features per specimen
+  - `metadata`: includes `participant_label`, `specimen_label`, and any merged columns (`time_to_rebound_days`, `rebounded`, `specimen_time_point`, etc.)
+- Reduce to one row per participant for survival (recommended: the pre-ATI specimen; if multiple, choose earliest or average features across pre-ATI specimens).
+
+### Fit survival models (outside Mal-ID core)
+Use the featurized matrix as covariates in a survival model:
+- **Cox proportional hazards** (e.g., with `lifelines`): models hazard as exp(linear combination of Mal-ID features)
+- **Random Survival Forest** (e.g., `scikit-survival`) for non-linear effects
+- **XGBoost survival** (Cox or AFT objectives) if preferred
+
+Typical inputs: `duration_col = time_to_rebound_days`, `event_col = rebounded`, covariates = Mal-ID features `X` (optionally plus demographics from `metadata`). Evaluate with concordance index and time-dependent metrics.
+
+### Alternative: discretize time and use classification
+If you’d rather stay within Mal-ID’s native classification workflow:
+- Bin time-to-rebound into categories (e.g., Early vs Late vs No rebound by a study-defined threshold), add that label to metadata, and train a classifier using the existing pipeline (see `malid/datamodels.py` for examples of target definitions).
+- This loses time resolution but requires no external survival tooling.
+
+### Notes
+- `helpers.get_all_specimen_info()` computes `specimen_time_point_days` for day-like strings; keep timepoint strings consistent to ease filtering.
+- Ensure group-aware splits by participant when doing any CV on survival models (no leakage across the same participant).
+- Control for demographics if desired: the metamodel supports adding or regressing out covariates; see `train/train_metamodel.py` and `trained_model_wrappers/blending_metamodel.py` for hooks.
