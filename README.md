@@ -4,6 +4,159 @@
 
 Mal-ID uses B cell receptor (BCR) and T cell receptor (TCR) sequencing data to classify disease or immune state. This codebase includes all the code and instructions needed to reproduce the publication and apply Mal-ID to other datasets.
 
+## System Architecture
+
+The following diagram illustrates the complete Mal-ID system architecture, showing how data flows from raw sequences through multiple machine learning models to final disease predictions:
+
+```mermaid
+graph TB
+    %% Data Sources
+    RawBCR[("Raw BCR Data<br/>(AIRR/Adaptive/In-house)")]
+    RawTCR[("Raw TCR Data<br/>(AIRR/Adaptive/In-house)")]
+    Metadata[("Metadata<br/>(Demographics, Disease Labels)")]
+    
+    %% Data Processing Pipeline
+    ETL["ETL Process<br/>(malid.etl)"]
+    Parquet[("Structured Data<br/>(sequences.parquet)")]
+    Sampling["Sequence Sampling<br/>(sample_sequences.py)"]
+    SampledData[("Sampled Data<br/>(sequences.sampled.parquet)")]
+    CVSplits["Cross-Validation Splits<br/>(make_cv_folds)"]
+    
+    %% Language Model Embedding
+    Embedder["Language Model Embedder<br/>(ESM-2, UniRep, AbLang)"]
+    EmbeddedData[("AnnData Objects<br/>(Embeddings + Metadata)")]
+    
+    %% Configuration System
+    Config["Configuration System<br/>(malid.config)"]
+    
+    %% Model 1: Repertoire Statistics
+    Model1["Model 1: Repertoire Stats<br/>(RepertoireClassifier)"]
+    Model1Features["Repertoire Summary Stats<br/>(V/J gene usage, diversity, etc.)"]
+    Model1Pred["Model 1 Predictions<br/>(Disease probabilities)"]
+    
+    %% Model 2: Convergent Clustering  
+    Model2["Model 2: Convergent Clustering<br/>(ConvergentClusterClassifier)"]
+    Model2Features["Convergent Sequence Clusters<br/>(Shared sequences across patients)"]
+    Model2Pred["Model 2 Predictions<br/>(Disease probabilities)"]
+    
+    %% Model 3: Sequence Classification (Two-stage)
+    Model3Stage1["Model 3a: Sequence Models<br/>(VJGeneSpecificSequenceClassifier)"]
+    Model3Stage2["Model 3b: Aggregation Models<br/>(RollupSequenceClassifier)"]
+    SeqPreds["Per-sequence Predictions<br/>(Split by V gene + isotype)"]
+    Model3Pred["Model 3 Predictions<br/>(Aggregated to sample level)"]
+    
+    %% Exact Matches Model (Baseline)
+    ExactModel["Exact Matches Model<br/>(ExactMatchesClassifier)"]
+    ExactPred["Exact Matches Predictions<br/>(Fisher's exact test)"]
+    
+    %% Metamodel (Ensemble)
+    Metamodel["Ensemble Metamodel<br/>(BlendingMetamodel)"]
+    MetaFeatures["Combined Features<br/>(Model predictions + demographics)"]
+    FinalPred["Final Disease Predictions<br/>(Ensemble output)"]
+    
+    %% Training Scripts
+    TrainScript1["train_repertoire_stats_models.py"]
+    TrainScript2["train_convergent_clustering_models.py"] 
+    TrainScript3a["train_vj_gene_specific_sequence_model.py"]
+    TrainScript3b["train_vj_gene_specific_sequence_model_rollup.py"]
+    TrainScriptMeta["train_metamodels.py"]
+    TrainScriptExact["train_exact_matches_models.py"]
+    
+    %% Analysis and Evaluation
+    Analysis["Analysis Notebooks<br/>(Performance evaluation, interpretation)"]
+    
+    %% Known Binder Validation
+    KnownBinders["Known Binder Databases<br/>(CoV-AbDab, MIRA, Influenza)"]
+    Validation["External Validation<br/>(Known binder ranking)"]
+    
+    %% Data flow connections
+    RawBCR --> ETL
+    RawTCR --> ETL
+    Metadata --> ETL
+    ETL --> Parquet
+    Parquet --> Sampling
+    Sampling --> SampledData
+    SampledData --> CVSplits
+    CVSplits --> Embedder
+    Embedder --> EmbeddedData
+    
+    %% Configuration influences
+    Config -.-> Embedder
+    Config -.-> CVSplits
+    Config -.-> Model1
+    Config -.-> Model2
+    Config -.-> Model3Stage1
+    Config -.-> Model3Stage2
+    Config -.-> Metamodel
+    
+    %% Model 1 flow
+    EmbeddedData --> Model1Features
+    Model1Features --> Model1
+    Model1 --> Model1Pred
+    TrainScript1 -.-> Model1
+    
+    %% Model 2 flow  
+    EmbeddedData --> Model2Features
+    Model2Features --> Model2
+    Model2 --> Model2Pred
+    TrainScript2 -.-> Model2
+    
+    %% Model 3 flow
+    EmbeddedData --> Model3Stage1
+    Model3Stage1 --> SeqPreds
+    SeqPreds --> Model3Stage2
+    Model3Stage2 --> Model3Pred
+    TrainScript3a -.-> Model3Stage1
+    TrainScript3b -.-> Model3Stage2
+    
+    %% Exact matches flow
+    EmbeddedData --> ExactModel
+    ExactModel --> ExactPred
+    TrainScriptExact -.-> ExactModel
+    
+    %% Metamodel flow
+    Model1Pred --> MetaFeatures
+    Model2Pred --> MetaFeatures
+    Model3Pred --> MetaFeatures
+    Metadata --> MetaFeatures
+    MetaFeatures --> Metamodel
+    Metamodel --> FinalPred
+    TrainScriptMeta -.-> Metamodel
+    
+    %% Analysis and validation
+    FinalPred --> Analysis
+    Model1Pred --> Analysis
+    Model2Pred --> Analysis  
+    Model3Pred --> Analysis
+    ExactPred --> Analysis
+    
+    KnownBinders --> Validation
+    Model2 --> Validation
+    Model3Stage1 --> Validation
+    
+    %% Styling
+    classDef dataNode fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef processNode fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef modelNode fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    classDef scriptNode fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef configNode fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    
+    class RawBCR,RawTCR,Metadata,Parquet,SampledData,EmbeddedData,Model1Features,Model2Features,SeqPreds,MetaFeatures dataNode
+    class ETL,Sampling,CVSplits,Embedder processNode
+    class Model1,Model2,Model3Stage1,Model3Stage2,ExactModel,Metamodel modelNode
+    class TrainScript1,TrainScript2,TrainScript3a,TrainScript3b,TrainScriptMeta,TrainScriptExact scriptNode
+    class Config configNode
+```
+
+### Key Components
+
+- **Data Pipeline**: Raw BCR/TCR sequences flow through ETL processing, sampling, and cross-validation splits before being embedded using protein language models
+- **Model 1**: Uses repertoire-level summary statistics (V/J gene usage, diversity measures) to classify disease state
+- **Model 2**: Identifies convergent sequence clusters shared across patients with the same disease
+- **Model 3**: Two-stage approach with sequence-level predictions (split by V gene + isotype) aggregated to sample-level predictions
+- **Metamodel**: Ensemble that combines predictions from all base models with optional demographic features
+- **Configuration System**: Centralized management of embedders, cross-validation strategies, and model parameters
+
 #### Table of Contents
 
   - [Installation](#installation)
